@@ -1,3 +1,4 @@
+package poker;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
@@ -42,5 +43,9 @@ public class Deck {
      */
     public void burn() {
         d.remove(0);
+    }
+    
+    public int size() {
+        return d.size();
     }
 }
