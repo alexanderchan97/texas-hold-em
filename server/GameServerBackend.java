@@ -6,45 +6,29 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.Collection;
 
-import poker.Action;
+import poker.Card;
 import poker.GameModel;
+import poker.HumanPlayer;
+import poker.Player;
 
 public final class GameServerBackend implements Runnable {
 
-    private final static int PORT = 25888;
-    
-    private final Model m;
-    
-    private final BlockingQueue<Task> taskQueue;
-    
+    public final static int PORT = 25888;    
+    private final GameModel gm;    
+    private int ready = 0;    
     private volatile ServerSocket serverSocket;
-    private final Map<Integer, Socket> openSockets;
     
     private volatile boolean running;
-    private volatile Thread modelThread;
     
-    public GameServerBackend(GameModel gm, GameServerModel gsm) {
-        if (gm == null || gsm == null) {
+    public GameServerBackend(GameModel gm) {
+        if (gm == null) {
             throw new NullPointerException();
         }
-        m = new Model();
-        m.setGameModel(gm);
-        m.setGameServerModel(gsm);
-        taskQueue = new LinkedBlockingQueue<>();
+        this.gm = gm;
         serverSocket = null;
-        openSockets = Collections.synchronizedMap(new HashMap<Integer, Socket>());
         running = false;
-        modelThread = null;
     }
     
     public boolean isRunning() {
@@ -64,76 +48,22 @@ public final class GameServerBackend implements Runnable {
             serverSocket = null;
         }
         
-        modelThread = new Thread(new Runnable() {
-            public void run() {
-                while (running || !taskQueue.isEmpty()) {
-                    Task task;
-                    try {
-                        task = taskQueue.take();
-                    } catch (InterruptedException e) {
-                        continue;
-                    }
-                    try {
-                        dispatchBroadcast(task.getBroadcast());
-                    } catch (RuntimeException e) {
-                        e.printStackTrace();
-                    }
-                }
-                
-                try {
-                    if (serverSocket != null && !serverSocket.isClosed()) {
-                        serverSocket.close();
-                    }
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        }, "Model thread");
-        modelThread.start();
-        
-        ExecutorService workerPool = Executors.newCachedThreadPool();
-        try {
-            int nextId = 0;
-            while (running && !serverSocket.isClosed()) {
-                int clientId = nextId++;
-                Socket clientSocket = serverSocket.accept();
-                openSockets.put(clientId, clientSocket);
-                taskQueue.add(new Registration(clientId));
-                workerPool.execute(new ConnectionWorker(clientId, clientSocket));
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            running = false;
-            workerPool.shutdown();
+        while(true) {
+            ClientWorker w;
             try {
-                if (serverSocket != null && !serverSocket.isClosed()) {
-                    serverSocket.close();
-                }
+                // Accept a new connection
+                w = new ClientWorker(serverSocket.accept());
+                // Create a thread to deal with this client
+                Thread t = new Thread(w);
+                t.start();
             } catch (IOException e) {
                 e.printStackTrace();
-            } finally {
-                serverSocket = null;
             }
         }
         
-        synchronized (openSockets) {
-            Iterator<Socket> sit = openSockets.values().iterator();
-            while (sit.hasNext()) {
-                Socket clientSocket = sit.next();
-                try {
-                    clientSocket.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                } finally {
-                    sit.remove();
-                }
-            }
-        }
     }
     
     public void stop() {
-        System.out.println("stopping");
         running = false;
         if (serverSocket != null && !serverSocket.isClosed()) {
             try {
@@ -142,140 +72,143 @@ public final class GameServerBackend implements Runnable {
                 e.printStackTrace();
             }
         }
-        if (modelThread != null) {
-            modelThread.interrupt();
-        }
-    }
-
-    private void dispatchBroadcast(Broadcast broadcast) {
-        if (broadcast == null) {
-            return;
-        }
-        
-        Map<Integer, List<String>> responses = broadcast.getResponses();
-        for (int id : responses.keySet()) {
-            try {
-                Socket clientSocket = openSockets.get(id);
-                PrintWriter pw = new PrintWriter(clientSocket.getOutputStream());
-                for (String response : responses.get(id)) {
-                    pw.println(response);
-                    pw.flush();
-                    System.out.printf("Response sent to user %d: \"%s\"\n",
-                            id, response);
-                }
-                pw.flush();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
     }
     
-    private final class ConnectionWorker implements Runnable {
-
-        private final int id;
-        private final Socket clientSocket;
-        BufferedReader reader = null;
-        PrintWriter writer = null;
+    
+    /**
+     * A ClientWorker is created for every connection to the server. Each
+     * ClientWorker handles the communication between that particular client
+     * and the server.
+     */
+    class ClientWorker implements Runnable {
+        private Socket client;
         
-        public ConnectionWorker(int id, Socket socket) {
-            this.id = id;
-            this.clientSocket = socket;
+        ClientWorker(Socket client) {
+            this.client = client;
         }
         
         @Override
         public void run() {
+            String line;
+            BufferedReader in = null;
+            PrintWriter out = null;
             try {
-                reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-                writer = new PrintWriter(clientSocket.getOutputStream(), true);
+                in = new BufferedReader(new InputStreamReader(client.getInputStream()));
+                out = new PrintWriter(client.getOutputStream(), true);
             } catch (IOException e) {
                 e.printStackTrace();
             }
-            
-            try {
-                while (running && !clientSocket.isClosed()) {
-                    String line = reader.readLine();
-                    if (line != null) {
-                        if (line.matches("\\d req gmc")) {
-                            writer.print(m.getGameModel().toString());
-                            System.out.println(m.getGameModel().toString());
+            while (true) {
+                try {
+                    if ((line = in.readLine()) != null) {
+                        //System.out.println("Request: " + line);
+                        int id = Integer.parseInt(line.substring(0, line.indexOf(' ')));
+                        if (line.matches("-1 req id")) {
+                            int numPlayers = gm.getPlayers().size();
+                            int startStack = gm.getStartStack();
+                            out.println(numPlayers + " " + startStack);
+                            gm.addPlayer(new HumanPlayer(numPlayers, startStack));
+                        } else if (line.matches("\\d req gmc")) {
+                            String update = gm.toString();
+                            out.println(update);
+                        } else if (line.matches("\\d disconnect")) {
+                            gm.removePlayer(id);
+                            break;
+                        } else if (line.matches("\\d ready")) {
+                            ready++;
+                            if (ready == 2) {
+                                ready = 0;
+                                Thread round = new Thread(new Runnable() {
+                                    public void run() {
+                                        gm.playRound();
+                                    }
+                                });
+                                round.start();
+                            }
+                        } else if (line.matches("\\d req player")) {
+                            Player p = gm.getPlayer(id);
+                            Collection<Card> cards = p.getHoleCards();
+                            if (cards.size() == 0) {
+                                out.println(String.valueOf(p.getChips()) + " null");
+                            } else {
+                                String cardString = Card.toString(cards);
+                                String chips = String.valueOf(p.getChips());
+                                out.println(chips + " " + cardString);
+                            }
+                        } else if (line.matches("\\d req board")) {
+                            Collection<Card> cards = gm.getBoard();
+                            if (cards.size() == 0) {
+                                out.println("null");
+                            } else {
+                                out.println(Card.toString(cards));
+                            }
+                        } else if (line.matches("\\d check 0")) {
+                            if (gm.isValidAction("check 0")) {
+                                Player p = gm.getPlayer(id);
+                                p.setAction("check 0");
+                                out.println("valid");
+                            } else {
+                                out.println("inv");
+                            }
+                        } else if (line.matches("\\d fold 0")) {
+                            if (gm.isValidAction("fold 0")) {
+                                Player p = gm.getPlayer(id);
+                                p.setAction("fold 0");
+                                out.println("valid");
+                            } else {
+                                out.println("inv");
+                            }
+                        } else if (line.matches("\\d call \\d*")) {
+                            String[] parse = line.split(" ");
+                            int val = Integer.valueOf(parse[2]);
+                            if (gm.isValidAction("call " + val)) {
+                                Player p = gm.getPlayer(id);
+                                p.setAction("call " + val);
+                                out.println("valid");
+                            } else {
+                                out.println("inv");
+                            }
+                        } else if (line.matches("\\d bet \\d*")) {
+                            String[] parse = line.split(" ");
+                            int val = Integer.valueOf(parse[2]);
+                            if (gm.isValidAction("bet " + val)) {
+                                Player p = gm.getPlayer(id);
+                                p.setAction("bet " + val);
+                                out.println("valid");
+                            } else {
+                                out.println("inv");
+                            }
+                        } else if (line.matches("\\d raise \\d*")) {
+                            String[] parse = line.split(" ");
+                            int val = Integer.valueOf(parse[2]);
+                            if (gm.isValidAction("raise " + val)) {
+                                Player p = gm.getPlayer(id);
+                                p.setAction("raise " + val);
+                                out.println("valid");
+                            } else {
+                                out.println("inv");
+                            }
+                        } else if (line.matches("\\d req turn")) {
+                            if (id == gm.getCurrPlayer()) {
+                                out.println("true");
+                            } else {
+                                out.println("false");
+                            }
                         }
-                        System.out.printf("Request received from user %d: " +
-                                "\"%s\"\n", id, line);
-                        String payload;
-                        if (line.startsWith(":")) {
-                            int index = line.indexOf(' ');
-                            payload = line.substring(index + 1);
-                        } else {
-                            payload = line;
-                        }
-                        Request request = new Request(id, payload);
-                        taskQueue.add(request);
-                    } else {
-                        clientSocket.close();
-                        taskQueue.add(new Disconnection(id));
                     }
+                } catch (IOException e) {
                 }
-            } catch (IOException e) {
-                e.printStackTrace();
             }
-            
-        }
-        
-    }
-    
-    private interface Task {
-        Broadcast getBroadcast();
-    }
-
-    /**
-     * Represents a client's connection to the server.
-     */
-    private final class Registration implements Task {
-        private final int userId;
-
-        public Registration(int userId) {
-            this.userId = userId;
-        }
-
-        @Override
-        public Broadcast getBroadcast() {
-            return m.getGameServerModel().registerUser(userId);
-        }
-    }
-
-    /**
-     * Represents a client's disconnection from the server.
-     */
-    private final class Disconnection implements Task {
-        private final int userId;
-
-        public Disconnection(int userId) {
-            this.userId = userId;
-        }
-
-        @Override
-        public Broadcast getBroadcast() {
-            return m.getGameServerModel().deregisterUser(userId);
-        }
-    }
-
-    /**
-     * Represents an incoming command from a connected client.
-     */
-    private final class Request implements Task {
-        private final int userId;
-        private final String payload;
-
-        public Request(int userId, String payload) {
-            this.userId = userId;
-            this.payload = payload;
-        }
-
-        @Override
-        public Broadcast getBroadcast() {
-            Action action = Action.stringToAction(userId + " " + payload);
-            return null;
         }
     }
     
+    protected void finalize() {
+        try {
+            serverSocket.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.exit(-1);
+        }
+    }
+
 }

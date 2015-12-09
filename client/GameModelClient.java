@@ -1,9 +1,9 @@
 package client;
 
 import java.util.Collection;
+import java.util.LinkedList;
 import java.util.Observable;
 import java.util.TreeSet;
-import poker.Action;
 import poker.Card;
 
 public class GameModelClient extends Observable {
@@ -14,7 +14,6 @@ public class GameModelClient extends Observable {
     private int currBet;
     private int round;
     private int oppChips;
-    private Collection<Action> validActions;
     private boolean isTurn;
     private Collection<Card> board;
     
@@ -24,9 +23,8 @@ public class GameModelClient extends Observable {
         blindBig = 0;
         currBet = 0;
         round = 0;
-        validActions = new TreeSet<Action>();
         isTurn = false;
-        board = new TreeSet<Card>();
+        board = new LinkedList<Card>();
     }
     
     public GameModelClient(int pot, int blindSmall, int blindBig, boolean isTurn) {
@@ -35,7 +33,6 @@ public class GameModelClient extends Observable {
         this.blindBig = blindBig;
         currBet = 0;
         round = 1;
-        validActions = new TreeSet<Action>();
         this.isTurn = isTurn;
         board = new TreeSet<Card>();
     }
@@ -118,16 +115,6 @@ public class GameModelClient extends Observable {
         notifyObservers();
     }
     
-    public Collection<Action> getValidActions() {
-        return validActions;
-    }
-    
-    public void addValidActions(Action a) {
-        validActions.add(a);
-        setChanged();
-        notifyObservers();
-    }
-    
     public boolean isTurn() {
         return isTurn;
     }
@@ -146,6 +133,9 @@ public class GameModelClient extends Observable {
     }
     
     public void addToBoard(String s) {
+        if(s.equals("null")) {
+            return;
+        }
         String[] cards = s.split(";");
         for (String c : cards) {
             board.add(new Card(c));
@@ -155,11 +145,14 @@ public class GameModelClient extends Observable {
     }
     
     public void updateModel(String command) {
-        if (!command.matches("\\d+ (pot|blindSmall|blindBig|currBet|round|oppChips|board) .+")) {
+        if (!command.matches("\\d+ ((pot|blindSmall|blindBig|currBet|round|oppChips|board) .+)")) {
             throw new IllegalArgumentException();
         }
         String[] parsed = command.split(" ");
-        int arg = Integer.parseInt(parsed[2]);
+        int arg = 0;
+        if (!parsed[1].equals("board")) {
+            arg = Integer.parseInt(parsed[2]);
+        }
         switch (parsed[1]) {
         case "pot":
             setPot(arg);
